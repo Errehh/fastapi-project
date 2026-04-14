@@ -4,6 +4,7 @@ from typing import List, Optional
 from sqlalchemy import func
 from .. import models, schemas, utils, oauth2
 from ..database import engine, get_db
+from ..redis_client import get_cache, set_cache, delete_cache
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
 
@@ -16,9 +17,18 @@ def get_posts(
     skip: int = 0,
     search: Optional[str] = "",
 ):
-    # cursor.execute("""SELECT * FROM posts;""")
-    # posts = cursor.fetchall()
-
+    # Create cache key based on query parameters
+    cache_key = f"posts:limit={limit}:skip={skip}:search={search}"
+    
+    # Try to get from cache
+    cached_posts = get_cache(cache_key)
+    if cached_posts:
+        print(f"✅ CACHE HIT - Returning {len(cached_posts)} posts from Redis")
+        return cached_posts
+    
+    print(f"❌ CACHE MISS - Querying database")
+    
+    # If not in cache, query database
     posts = (
         db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
         .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
@@ -28,7 +38,32 @@ def get_posts(
         .offset(skip)
         .all()
     )
-
+    
+    # Convert to dict for caching
+    posts_dict = [
+        {
+            "Post": {
+                "id": post.Post.id,
+                "title": post.Post.title,
+                "content": post.Post.content,
+                "published": post.Post.published,
+                "created_at": post.Post.created_at.isoformat(),
+                "owner_id": post.Post.owner_id,
+                "owner": {
+                    "id": post.Post.owner.id,
+                    "email": post.Post.owner.email,
+                    "created_at": post.Post.owner.created_at.isoformat(),
+                }
+            },
+            "votes": post.votes
+        }
+        for post in posts
+    ]
+    
+    # Cache for 5 minutes
+    set_cache(cache_key, posts_dict, expire=300)
+    print(f"💾 Cached {len(posts_dict)} posts in Redis")
+    
     return posts
 
 
@@ -38,15 +73,14 @@ def create_posts(
     db: Session = Depends(get_db),
     current_user: int = Depends(oauth2.get_current_user),
 ):
-    # cursor.execute("""INSERT INTO posts (title, content, published) VALUES (%s, %s, %s) RETURNING *""",
-    #                (post.title, post.content, post.published))
-    # new_post =  cursor.fetchone()
-    # conn.commit()
-
     new_post = models.Post(owner_id=current_user.id, **post.dict())
     db.add(new_post)
     db.commit()
     db.refresh(new_post)
+    
+    # Invalidate posts cache
+    delete_cache("posts:*")
+    
     return new_post
 
 
@@ -80,10 +114,6 @@ def delete_post(
     db: Session = Depends(get_db),
     current_user: int = Depends(oauth2.get_current_user),
 ):
-    # cursor.execute(""" DELETE FROM posts WHERE id = %s RETURNING *""", (str(id),))
-    # deleted_post = cursor.fetchone()
-    # conn.commit()
-
     post_query = db.query(models.Post).filter(models.Post.id == id)
     post = post_query.first()
     if post == None:
@@ -98,6 +128,10 @@ def delete_post(
         )
     post_query.delete(synchronize_session=False)
     db.commit()
+    
+    # Invalidate posts cache
+    delete_cache("posts:*")
+    
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -108,11 +142,6 @@ def update_post(
     db: Session = Depends(get_db),
     current_user: int = Depends(oauth2.get_current_user),
 ):
-    # cursor.execute(""" UPDATE posts SET title = %s, content = %s, published = %s WHERE id = %s RETURNING * """,
-    #                (post.title, post.content, post.published, str(id)),)
-    # updated_post = cursor.fetchone()
-    # conn.commit()
-
     post_query = db.query(models.Post).filter(models.Post.id == id)
     post = post_query.first()
     if post == None:
@@ -127,4 +156,8 @@ def update_post(
         )
     post_query.update(updated_post.dict(), synchronize_session=False)
     db.commit()
+    
+    # Invalidate posts cache
+    delete_cache("posts:*")
+    
     return post

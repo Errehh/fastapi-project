@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     secret_key: str
     algorithm: str
     access_token_expire_minutes: int
+    redis_host: str = "localhost"
+    redis_port: int = 6379
 
     class Config:
         env_file = ".env"

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, status, HTTPException, Response, Depends, APIRouter
 from sqlalchemy.orm import Session
 from .. import schemas, database, models, oauth2
+from ..redis_client import delete_cache
 
 
 router = APIRouter(prefix="/vote", tags=["Vote"])
@@ -33,6 +34,10 @@ def vote(
         new_vote = models.Vote(post_id=vote.post_id, user_id=current_user.id)
         db.add(new_vote)
         db.commit()
+        
+        # Invalidate posts cache since vote counts changed
+        delete_cache("posts:*")
+        
         return {"message": "successfully added vote"}
     else:
         if not found_vote:
@@ -42,5 +47,8 @@ def vote(
 
         vote_query.delete(synchronize_session=False)
         db.commit()
+        
+        # Invalidate posts cache since vote counts changed
+        delete_cache("posts:*")
 
         return {"message": "Successfully deleted vote"}
